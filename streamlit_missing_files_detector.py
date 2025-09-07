@@ -1,0 +1,788 @@
+#!/usr/bin/env python3
+"""
+Streamlit Application for Missing Files Detection
+
+This app provides a web interface to:
+1. Select folders to scan
+2. Visualize missing files in an interactive way
+3. Generate detailed reports
+4. Export results
+
+Run with: streamlit run streamlit_missing_files_detector.py
+"""
+
+import streamlit as st
+import os
+import json
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+import plotly.express as px
+import plotly.graph_objects as go
+from typing import List, Dict, Tuple
+import base64
+import tkinter as tk
+from tkinter import filedialog
+import threading
+
+
+class StreamlitMissingFilesDetector:
+    def __init__(self):
+        """Initialize the Streamlit detector."""
+        self.results = {
+            "scan_date": None,
+            "root_path": None,
+            "empty_folders": [],
+            "json_only_folders": [],
+            "folders_with_empty_files": [],  # New category
+            "valid_folders": [],
+            "summary": {}
+        }
+    
+    def select_folder_dialog(self) -> str:
+        """Open a folder selection dialog and return the selected path."""
+        try:
+            # Create a root window and hide it
+            root = tk.Tk()
+            root.withdraw()
+            root.wm_attributes('-topmost', 1)
+            
+            # Set window icon if available
+            try:
+                root.iconbitmap(default='folder.ico')
+            except:
+                pass  # Icon file not found, continue without it
+            
+            # Open folder dialog
+            folder_path = filedialog.askdirectory(
+                title="Select Folder to Scan - Missing Files Detector",
+                initialdir=os.getcwd(),
+                mustexist=True
+            )
+            
+            # Destroy the root window
+            root.destroy()
+            
+            return folder_path if folder_path else ""
+        
+        except ImportError:
+            st.error("tkinter is not available. Please use manual path entry instead.")
+            return ""
+        except Exception as e:
+            st.error(f"Error opening folder dialog: {e}")
+            return ""
+    
+    def handle_folder_selection(self):
+        """Handle folder selection with proper session state management."""
+        selected_path = self.select_folder_dialog()
+        if selected_path:
+            return selected_path
+        return None
+    
+    def get_available_folders(self, base_path: str = ".") -> List[str]:
+        """Get list of available folders to scan."""
+        folders = []
+        try:
+            for item in Path(base_path).iterdir():
+                if item.is_dir() and not item.name.startswith('.'):
+                    folders.append(str(item))
+        except Exception as e:
+            st.error(f"Error reading folders: {e}")
+        return sorted(folders)
+    
+    def is_leaf_folder(self, folder_path: Path) -> bool:
+        """Check if a folder is a leaf folder (contains no subfolders)."""
+        try:
+            return not any(item.is_dir() for item in folder_path.iterdir())
+        except PermissionError:
+            return False
+    
+    def get_file_types(self, folder_path: Path) -> Dict[str, List[str]]:
+        """Get categorized file types in a folder."""
+        file_types = {
+            "json_files": [],
+            "md_files": [],
+            "log_files": [],
+            "other_files": [],
+            "empty_files": []  # New category for empty files
+        }
+        
+        try:
+            for item in folder_path.iterdir():
+                if item.is_file():
+                    file_name = item.name
+                    
+                    # Check if file is empty (0 bytes)
+                    try:
+                        file_size = item.stat().st_size
+                        is_empty = file_size == 0
+                    except:
+                        is_empty = False
+                    
+                    # Categorize by file type
+                    if file_name.lower().endswith('.json'):
+                        if is_empty:
+                            file_types["empty_files"].append(file_name)
+                        else:
+                            file_types["json_files"].append(file_name)
+                    elif file_name.lower().endswith('.md'):
+                        if is_empty:
+                            file_types["empty_files"].append(file_name)
+                        else:
+                            file_types["md_files"].append(file_name)
+                    elif file_name.lower().endswith('.log'):
+                        if is_empty:
+                            file_types["empty_files"].append(file_name)
+                        else:
+                            file_types["log_files"].append(file_name)
+                    else:
+                        # Filter out system files
+                        if not file_name.startswith('.'):
+                            if is_empty:
+                                file_types["empty_files"].append(file_name)
+                            else:
+                                file_types["other_files"].append(file_name)
+        except PermissionError:
+            pass
+        
+        return file_types
+    
+    def scan_folder(self, folder_path: Path, progress_bar=None) -> None:
+        """Recursively scan folders to detect missing files."""
+        try:
+            # Skip system files and hidden directories
+            if folder_path.name.startswith('.'):
+                return
+            
+            # Get all subdirectories for progress tracking
+            all_dirs = []
+            for root, dirs, files in os.walk(folder_path):
+                # Filter out hidden directories
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                all_dirs.extend([Path(root) / d for d in dirs])
+            
+            # Add leaf directories
+            leaf_dirs = []
+            for root, dirs, files in os.walk(folder_path):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                if not dirs:  # This is a leaf directory
+                    leaf_dirs.append(Path(root))
+            
+            total_dirs = len(leaf_dirs)
+            
+            # Check each leaf folder
+            for idx, current_dir in enumerate(leaf_dirs):
+                if progress_bar:
+                    progress_bar.progress((idx + 1) / total_dirs)
+                
+                relative_path = current_dir.relative_to(folder_path)
+                self.check_leaf_folder(current_dir, str(relative_path))
+        
+        except Exception as e:
+            st.error(f"Error scanning {folder_path}: {e}")
+    
+    def check_leaf_folder(self, folder_path: Path, relative_path: str) -> None:
+        """Check a leaf folder for missing files and empty files."""
+        file_types = self.get_file_types(folder_path)
+        
+        # Count total files (excluding system files)
+        total_files = sum(len(files) for key, files in file_types.items() if key != "empty_files")
+        empty_files_count = len(file_types["empty_files"])
+        
+        folder_info = {
+            "path": relative_path,
+            "absolute_path": str(folder_path),
+            "file_counts": {
+                "md_files": len(file_types["md_files"]),
+                "json_files": len(file_types["json_files"]),
+                "log_files": len(file_types["log_files"]),
+                "other_files": len(file_types["other_files"]),
+                "empty_files": empty_files_count
+            },
+            "files": file_types
+        }
+        
+        # Priority 1: Check if folder is completely empty
+        if total_files == 0 and empty_files_count == 0:
+            folder_info["issue"] = "Completely empty folder"
+            folder_info["severity"] = "high"
+            self.results["empty_folders"].append(folder_info)
+        
+        # Priority 2: Check if folder contains only JSON files (missing main content)
+        elif (len(file_types["json_files"]) > 0 and 
+              len(file_types["md_files"]) == 0 and 
+              len(file_types["log_files"]) == 0 and 
+              len(file_types["other_files"]) == 0 and
+              empty_files_count == 0):
+            folder_info["issue"] = "Contains only JSON files, missing main content files (.md)"
+            folder_info["severity"] = "high"
+            self.results["json_only_folders"].append(folder_info)
+        
+        # Priority 3: Check if folder has empty files (new criteria)
+        elif empty_files_count > 0:
+            if len(file_types["md_files"]) > 0:
+                # Has content but also has empty files
+                folder_info["issue"] = f"Folder has content but contains {empty_files_count} empty file(s)"
+                folder_info["severity"] = "medium"
+            else:
+                # No main content and has empty files
+                folder_info["issue"] = f"No main content files, contains {empty_files_count} empty file(s)"
+                folder_info["severity"] = "high"
+            
+            self.results["folders_with_empty_files"].append(folder_info)
+        
+        # Valid folders with proper content
+        elif len(file_types["md_files"]) > 0:
+            folder_info["issue"] = "Valid folder with content"
+            folder_info["severity"] = "none"
+            self.results["valid_folders"].append(folder_info)
+    
+    def generate_summary(self) -> None:
+        """Generate summary statistics."""
+        self.results["summary"] = {
+            "total_empty_folders": len(self.results["empty_folders"]),
+            "total_json_only_folders": len(self.results["json_only_folders"]),
+            "total_folders_with_empty_files": len(self.results["folders_with_empty_files"]),
+            "total_valid_folders": len(self.results["valid_folders"]),
+            "total_problematic_folders": (
+                len(self.results["empty_folders"]) + 
+                len(self.results["json_only_folders"]) +
+                len(self.results["folders_with_empty_files"])
+            ),
+            "total_scanned_folders": (
+                len(self.results["empty_folders"]) + 
+                len(self.results["json_only_folders"]) + 
+                len(self.results["folders_with_empty_files"]) +
+                len(self.results["valid_folders"])
+            )
+        }
+    
+    def run_scan(self, selected_folder: str) -> Dict:
+        """Run the missing files detection scan."""
+        # Reset results
+        self.results = {
+            "scan_date": datetime.now().isoformat(),
+            "root_path": selected_folder,
+            "empty_folders": [],
+            "json_only_folders": [],
+            "folders_with_empty_files": [],
+            "valid_folders": [],
+            "summary": {}
+        }
+        
+        folder_path = Path(selected_folder)
+        
+        if not folder_path.exists():
+            st.error(f"Selected folder does not exist: {selected_folder}")
+            return self.results
+        
+        if not folder_path.is_dir():
+            st.error(f"Selected path is not a directory: {selected_folder}")
+            return self.results
+        
+        # Create progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        status_text.text(f"Scanning folder: {selected_folder}")
+        
+        # Start scanning
+        self.scan_folder(folder_path, progress_bar)
+        
+        # Generate summary
+        self.generate_summary()
+        
+        progress_bar.progress(1.0)
+        status_text.text("Scan completed!")
+        
+        return self.results
+
+
+def create_download_link(data, filename, link_text):
+    """Create a download link for data."""
+    json_str = json.dumps(data, ensure_ascii=False, indent=2)
+    b64 = base64.b64encode(json_str.encode('utf-8')).decode()
+    href = f'<a href="data:application/json;base64,{b64}" download="{filename}">{link_text}</a>'
+    return href
+
+
+def display_folder_details(folders_data, title, color, icon):
+    """Display detailed information about folders."""
+    if not folders_data:
+        st.info(f"No {title.lower()} found.")
+        return
+    
+    st.markdown(f"### {icon} {title} ({len(folders_data)} folders)")
+    
+    # Create expandable sections for each folder
+    for idx, folder in enumerate(folders_data):
+        folder_name = folder['path']
+        
+        # Create columns for better layout
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            with st.expander(f"📁 {folder_name}", expanded=False):
+                st.markdown(f"**Path:** `{folder['absolute_path']}`")
+                st.markdown(f"**Issue:** {folder['issue']}")
+                
+                # File counts
+                counts = folder['file_counts']
+                col_md, col_json, col_log, col_other, col_empty = st.columns(5)
+                
+                with col_md:
+                    st.metric("MD Files", counts['md_files'])
+                with col_json:
+                    st.metric("JSON Files", counts['json_files'])
+                with col_log:
+                    st.metric("Log Files", counts['log_files'])
+                with col_other:
+                    st.metric("Other Files", counts['other_files'])
+                with col_empty:
+                    empty_count = counts.get('empty_files', 0)
+                    if empty_count > 0:
+                        st.metric("Empty Files", empty_count, delta_color="inverse")
+                    else:
+                        st.metric("Empty Files", empty_count)
+                
+                # List actual files if any exist
+                files = folder['files']
+                if any(files.values()):
+                    st.markdown("**Files:**")
+                    
+                    for file_type, file_list in files.items():
+                        if file_list:
+                            file_type_name = file_type.replace('_', ' ').title()
+                            st.markdown(f"- **{file_type_name}:** {', '.join(file_list)}")
+        
+        with col2:
+            # Status indicator based on severity
+            severity = folder.get('severity', 'none')
+            issue = folder['issue']
+            
+            if severity == 'none' or "Valid folder" in issue:
+                st.success("✅ Valid")
+            elif severity == 'high' or "empty" in issue.lower() or "only JSON" in issue:
+                st.error("❌ Critical")
+            elif severity == 'medium' or "empty file" in issue.lower():
+                st.warning("⚠️ Issues")
+            else:
+                st.info("🔍 Unknown")
+
+
+def create_visualizations(results):
+    """Create interactive visualizations for the results."""
+    summary = results['summary']
+    
+    # Summary metrics
+    st.markdown("### 📊 Summary Dashboard")
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric(
+            "Total Scanned",
+            summary['total_scanned_folders'],
+            delta=None
+        )
+    
+    with col2:
+        st.metric(
+            "Empty Folders",
+            summary['total_empty_folders'],
+            delta=None,
+            delta_color="inverse"
+        )
+    
+    with col3:
+        st.metric(
+            "JSON-Only Folders",
+            summary['total_json_only_folders'],
+            delta=None,
+            delta_color="inverse"
+        )
+    
+    with col4:
+        st.metric(
+            "Empty Files Issues",
+            summary['total_folders_with_empty_files'],
+            delta=None,
+            delta_color="inverse"
+        )
+    
+    with col5:
+        st.metric(
+            "Valid Folders",
+            summary['total_valid_folders'],
+            delta=None
+        )
+    
+    # Charts
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        # Pie chart for folder status
+        labels = ['Empty Folders', 'JSON-Only Folders', 'Empty Files Issues', 'Valid Folders']
+        values = [
+            summary['total_empty_folders'],
+            summary['total_json_only_folders'],
+            summary['total_folders_with_empty_files'],
+            summary['total_valid_folders']
+        ]
+        colors = ['#FF6B6B', '#FFE66D', '#FF8C42', '#4ECDC4']
+        
+        fig_pie = go.Figure(data=[go.Pie(
+            labels=labels,
+            values=values,
+            marker_colors=colors,
+            textinfo='label+percent+value'
+        )])
+        
+        fig_pie.update_layout(
+            title="Folder Status Distribution",
+            font=dict(size=12)
+        )
+        
+        st.plotly_chart(fig_pie, use_container_width=True)
+    
+    with col_chart2:
+        # Bar chart for problems
+        problem_types = ['Empty Folders', 'JSON-Only Folders', 'Empty Files Issues']
+        problem_counts = [
+            summary['total_empty_folders'],
+            summary['total_json_only_folders'],
+            summary['total_folders_with_empty_files']
+        ]
+        
+        fig_bar = go.Figure([go.Bar(
+            x=problem_types,
+            y=problem_counts,
+            marker_color=['#FF6B6B', '#FFE66D', '#FF8C42']
+        )])
+        
+        fig_bar.update_layout(
+            title="Problems by Type",
+            xaxis_title="Problem Type",
+            yaxis_title="Count",
+            font=dict(size=12)
+        )
+        
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+
+def main():
+    """Main Streamlit application."""
+    st.set_page_config(
+        page_title="Missing Files Detector",
+        page_icon="🔍",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    # Configure Streamlit to run locally
+    if 'first_run' not in st.session_state:
+        st.session_state.first_run = True
+    
+    # Custom CSS for better styling
+    st.markdown("""
+    <style>
+    .main-header {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+    }
+    .main-header h1 {
+        color: white;
+        text-align: center;
+        margin: 0;
+    }
+    .main-header p {
+        color: white;
+        text-align: center;
+        margin: 0.5rem 0 0 0;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Header
+    st.markdown("""
+    <div class="main-header">
+        <h1>🔍 Missing Files Detector</h1>
+        <p>Comprehensive tool to detect missing files in folder structures</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Initialize detector
+    detector = StreamlitMissingFilesDetector()
+    
+    # Sidebar for controls
+    with st.sidebar:
+        st.markdown("### 🎛️ Controls")
+        
+        # Folder selection
+        st.markdown("#### Select Folder to Scan")
+        
+        # Option to use current directory or browse
+        scan_option = st.radio(
+            "Scanning Options:",
+            ["Use textData folder", "Select custom folder", "Browse for folder"]
+        )
+        
+        selected_folder = None
+        
+        if scan_option == "Use textData folder":
+            if os.path.exists("textData"):
+                selected_folder = "textData"
+                st.success("✅ textData folder found")
+            else:
+                st.error("❌ textData folder not found in current directory")
+        
+        elif scan_option == "Select custom folder":
+            available_folders = detector.get_available_folders()
+            if available_folders:
+                selected_folder = st.selectbox(
+                    "Available folders:",
+                    available_folders
+                )
+            else:
+                st.warning("No folders found in current directory")
+        
+        elif scan_option == "Browse for folder":
+            st.markdown("**🗂️ Choose a folder to scan:**")
+            st.info("💡 You can either enter the path manually or use the Browse button to select a folder.")
+            
+            # Initialize session state for selected folder
+            if 'selected_folder_path' not in st.session_state:
+                st.session_state.selected_folder_path = ""
+            
+            # Text input for manual path entry (full width)
+            manual_path = st.text_input(
+                "Folder path:",
+                value=st.session_state.selected_folder_path,
+                placeholder="Enter folder path manually or click Browse...",
+                key="manual_path_input",
+                help="Enter the full path to the folder you want to scan"
+            )
+            
+            # Update session state when user types manually
+            if manual_path != st.session_state.selected_folder_path:
+                st.session_state.selected_folder_path = manual_path
+            
+            # Create two columns for buttons with better spacing
+            col_browse, col_clear, col_spacer = st.columns([1, 1, 2])
+            
+            with col_browse:
+                # Browse button
+                if st.button("🗂️ Browse", help="Open folder selection dialog", type="secondary", use_container_width=True):
+                    with st.spinner("Opening folder dialog..."):
+                        selected_path = detector.select_folder_dialog()
+                        if selected_path:
+                            # Store in session state
+                            st.session_state.selected_folder_path = selected_path
+                            st.success(f"✅ Folder selected: {os.path.basename(selected_path)}")
+                        else:
+                            st.info("No folder selected")
+            
+            with col_clear:
+                # Clear button
+                if st.button("🗑️ Clear", help="Clear folder selection", type="secondary", use_container_width=True):
+                    st.session_state.selected_folder_path = ""
+                    st.info("Folder selection cleared")
+            
+            # Use the path from session state
+            current_path = st.session_state.selected_folder_path
+            if current_path:
+                if os.path.exists(current_path) and os.path.isdir(current_path):
+                    selected_folder = current_path
+                    # Show folder info
+                    try:
+                        folder_info = os.listdir(current_path)
+                        folder_count = len([item for item in folder_info if os.path.isdir(os.path.join(current_path, item))])
+                        file_count = len([item for item in folder_info if os.path.isfile(os.path.join(current_path, item))])
+                        st.success(f"✅ Valid folder: {folder_count} subfolders, {file_count} files")
+                    except:
+                        st.success("✅ Path exists and is accessible")
+                elif os.path.exists(current_path):
+                    st.error("❌ Path exists but is not a folder")
+                else:
+                    st.error("❌ Path does not exist")
+        
+        # Scan button
+        scan_button = st.button("🚀 Start Scan", type="primary", disabled=not selected_folder)
+        
+        # Additional options
+        st.markdown("#### 🔧 Options")
+        show_valid_folders = st.checkbox("Show valid folders in results", value=True)
+        auto_download = st.checkbox("Auto-download report", value=False)
+    
+    # Main content area
+    if scan_button and selected_folder:
+        st.markdown(f"### 🔍 Scanning: `{selected_folder}`")
+        
+        # Run the scan
+        results = detector.run_scan(selected_folder)
+        
+        # Store results in session state for persistence
+        st.session_state['scan_results'] = results
+        st.session_state['show_valid_folders'] = show_valid_folders
+        
+        st.success("✅ Scan completed successfully!")
+    
+    # Display results if available
+    if 'scan_results' in st.session_state:
+        results = st.session_state['scan_results']
+        show_valid = st.session_state.get('show_valid_folders', True)
+        
+        # Create visualizations
+        create_visualizations(results)
+        
+        # Tabs for different views
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📋 Summary", 
+            "❌ Empty Folders", 
+            "⚠️ JSON-Only Folders", 
+            "🗂️ Empty Files Issues",
+            "✅ Valid Folders" if show_valid else "📊 Export"
+        ])
+        
+        with tab1:
+            st.markdown("### 📋 Scan Summary")
+            
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.markdown(f"""
+                **Scan Information:**
+                - **Folder Scanned:** `{results['root_path']}`
+                - **Scan Date:** {datetime.fromisoformat(results['scan_date']).strftime('%Y-%m-%d %H:%M:%S')}
+                - **Total Folders:** {results['summary']['total_scanned_folders']}
+                - **Problematic Folders:** {results['summary']['total_problematic_folders']}
+                """)
+            
+            with col2:
+                # Download options
+                st.markdown("**📥 Download Reports:**")
+                
+                # JSON report
+                json_link = create_download_link(
+                    results,
+                    f"missing_files_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    "📄 Download JSON Report"
+                )
+                st.markdown(json_link, unsafe_allow_html=True)
+                
+                # CSV report for problematic folders
+                if results['summary']['total_problematic_folders'] > 0:
+                    problematic_data = []
+                    
+                    for folder in results['empty_folders']:
+                        problematic_data.append({
+                            'Path': folder['path'],
+                            'Issue Type': 'Empty Folder',
+                            'Severity': folder.get('severity', 'high'),
+                            'Issue': folder['issue'],
+                            'MD Files': folder['file_counts']['md_files'],
+                            'JSON Files': folder['file_counts']['json_files'],
+                            'Empty Files': folder['file_counts'].get('empty_files', 0)
+                        })
+                    
+                    for folder in results['json_only_folders']:
+                        problematic_data.append({
+                            'Path': folder['path'],
+                            'Issue Type': 'JSON-Only Folder',
+                            'Severity': folder.get('severity', 'high'),
+                            'Issue': folder['issue'],
+                            'MD Files': folder['file_counts']['md_files'],
+                            'JSON Files': folder['file_counts']['json_files'],
+                            'Empty Files': folder['file_counts'].get('empty_files', 0)
+                        })
+                    
+                    for folder in results['folders_with_empty_files']:
+                        problematic_data.append({
+                            'Path': folder['path'],
+                            'Issue Type': 'Empty Files Issue',
+                            'Severity': folder.get('severity', 'medium'),
+                            'Issue': folder['issue'],
+                            'MD Files': folder['file_counts']['md_files'],
+                            'JSON Files': folder['file_counts']['json_files'],
+                            'Empty Files': folder['file_counts'].get('empty_files', 0)
+                        })
+                    
+                    df = pd.DataFrame(problematic_data)
+                    csv = df.to_csv(index=False)
+                    
+                    st.download_button(
+                        label="📊 Download CSV Report",
+                        data=csv,
+                        file_name=f"problematic_folders_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+        
+        with tab2:
+            display_folder_details(
+                results['empty_folders'],
+                "Empty Folders",
+                "#FF6B6B",
+                "❌"
+            )
+        
+        with tab3:
+            display_folder_details(
+                results['json_only_folders'],
+                "JSON-Only Folders",
+                "#FFE66D",
+                "⚠️"
+            )
+        
+        with tab4:
+            display_folder_details(
+                results['folders_with_empty_files'],
+                "Folders with Empty Files",
+                "#FF8C42",
+                "🗂️"
+            )
+        
+        with tab5:
+            if show_valid:
+                display_folder_details(
+                    results['valid_folders'],
+                    "Valid Folders",
+                    "#4ECDC4",
+                    "✅"
+                )
+            else:
+                st.markdown("### 📊 Export Options")
+                st.info("Enable 'Show valid folders in results' in the sidebar to view valid folders here.")
+    
+    else:
+        # Welcome message
+        st.markdown("""
+        ### 👋 Welcome to Missing Files Detector
+        
+        This application helps you identify folders that are missing important files in your directory structure.
+        
+        **What it detects:**
+        - **Empty Folders**: Completely empty directories
+        - **JSON-Only Folders**: Folders containing only JSON files without main content (.md files)
+        - **Empty Files Issues**: Folders containing files that exist but are empty (0 bytes)
+        - **Valid Folders**: Folders with proper content structure
+        
+        **Detection Criteria:**
+        1. ✅ **Valid**: Contains .md files with actual content
+        2. ❌ **Empty Folder**: No files at all
+        3. ⚠️ **JSON-Only**: Only metadata files, no main content
+        4. 🗂️ **Empty Files**: Contains files but some/all are empty (0 bytes)
+        
+        **How to use:**
+        1. Select a folder to scan from the sidebar
+        2. Click "Start Scan" to begin the analysis
+        3. Review the results in the interactive dashboard
+        4. Export reports for further analysis
+        
+        **Get started by selecting a folder in the sidebar! 👈**
+        """)
+
+
+if __name__ == "__main__":
+    main()
