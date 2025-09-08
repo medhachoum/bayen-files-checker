@@ -21,9 +21,17 @@ import plotly.express as px
 import plotly.graph_objects as go
 from typing import List, Dict, Tuple
 import base64
-import tkinter as tk
-from tkinter import filedialog
 import threading
+
+# Optional tkinter import for local environments
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+    TKINTER_AVAILABLE = True
+except ImportError:
+    TKINTER_AVAILABLE = False
+    tk = None
+    filedialog = None
 
 
 class StreamlitMissingFilesDetector:
@@ -41,6 +49,11 @@ class StreamlitMissingFilesDetector:
     
     def select_folder_dialog(self) -> str:
         """Open a folder selection dialog and return the selected path."""
+        if not TKINTER_AVAILABLE:
+            st.error("🌐 Folder dialog is not available in cloud environment. Please enter the folder path manually.")
+            st.info("💡 Tip: You can use paths like 'textData' or upload your data to the cloud environment first.")
+            return ""
+        
         try:
             # Create a root window and hide it
             root = tk.Tk()
@@ -65,9 +78,6 @@ class StreamlitMissingFilesDetector:
             
             return folder_path if folder_path else ""
         
-        except ImportError:
-            st.error("tkinter is not available. Please use manual path entry instead.")
-            return ""
         except Exception as e:
             st.error(f"Error opening folder dialog: {e}")
             return ""
@@ -524,9 +534,14 @@ def main():
         st.markdown("#### Select Folder to Scan")
         
         # Option to use current directory or browse
+        if TKINTER_AVAILABLE:
+            scan_options = ["Use textData folder", "Select custom folder", "Browse for folder"]
+        else:
+            scan_options = ["Use textData folder", "Select custom folder", "Browse for folder", "Upload sample data"]
+        
         scan_option = st.radio(
             "Scanning Options:",
-            ["Use textData folder", "Select custom folder", "Browse for folder"]
+            scan_options
         )
         
         selected_folder = None
@@ -550,17 +565,24 @@ def main():
         
         elif scan_option == "Browse for folder":
             st.markdown("**🗂️ Choose a folder to scan:**")
-            st.info("💡 You can either enter the path manually or use the Browse button to select a folder.")
+            
+            # Show different instructions based on environment
+            if TKINTER_AVAILABLE:
+                st.info("💡 You can either enter the path manually or use the Browse button to select a folder.")
+            else:
+                st.info("🌐 Running in cloud mode. Please enter the folder path manually. You can use relative paths like 'data' or 'textData'.")
+                st.warning("⚠️ Note: In cloud environment, you'll need to upload your data files first or use sample data paths.")
             
             # Initialize session state for selected folder
             if 'selected_folder_path' not in st.session_state:
                 st.session_state.selected_folder_path = ""
             
             # Text input for manual path entry (full width)
+            placeholder_text = "Enter folder path manually..." if not TKINTER_AVAILABLE else "Enter folder path manually or click Browse..."
             manual_path = st.text_input(
                 "Folder path:",
                 value=st.session_state.selected_folder_path,
-                placeholder="Enter folder path manually or click Browse...",
+                placeholder=placeholder_text,
                 key="manual_path_input",
                 help="Enter the full path to the folder you want to scan"
             )
@@ -569,28 +591,87 @@ def main():
             if manual_path != st.session_state.selected_folder_path:
                 st.session_state.selected_folder_path = manual_path
             
-            # Create two columns for buttons with better spacing
-            col_browse, col_clear, col_spacer = st.columns([1, 1, 2])
+            # Show current path status
+            if st.session_state.selected_folder_path:
+                st.markdown(f"**Current selection:** `{st.session_state.selected_folder_path}`")
             
-            with col_browse:
-                # Browse button
-                if st.button("🗂️ Browse", help="Open folder selection dialog", type="secondary", use_container_width=True):
-                    with st.spinner("Opening folder dialog..."):
-                        selected_path = detector.select_folder_dialog()
-                        if selected_path:
-                            # Store in session state
-                            st.session_state.selected_folder_path = selected_path
-                            st.success(f"✅ Folder selected: {os.path.basename(selected_path)}")
-                        else:
-                            st.info("No folder selected")
+            # IMPORTANT: Always check session state for folder selection
+            if st.session_state.selected_folder_path:
+                current_path = st.session_state.selected_folder_path
+                if os.path.exists(current_path) and os.path.isdir(current_path):
+                    selected_folder = current_path
             
-            with col_clear:
-                # Clear button
-                if st.button("🗑️ Clear", help="Clear folder selection", type="secondary", use_container_width=True):
-                    st.session_state.selected_folder_path = ""
-                    st.info("Folder selection cleared")
+            # Only show buttons if tkinter is available or for clear functionality
+            if TKINTER_AVAILABLE:
+                # Create two columns for buttons with better spacing
+                col_browse, col_clear, col_spacer = st.columns([1, 1, 2])
+                
+                with col_browse:
+                    # Browse button
+                    if st.button("🗂️ Browse", help="Open folder selection dialog", type="secondary", use_container_width=True):
+                        with st.spinner("Opening folder dialog..."):
+                            selected_path = detector.select_folder_dialog()
+                            if selected_path:
+                                # Store in session state
+                                st.session_state.selected_folder_path = selected_path
+                                st.success(f"✅ Folder selected: {os.path.basename(selected_path)}")
+                                # Note: Removed automatic rerun to prevent clearing the selection
+                            else:
+                                st.info("No folder selected")
+                
+                with col_clear:
+                    # Clear button
+                    if st.button("🗑️ Clear", help="Clear folder selection", type="secondary", use_container_width=True):
+                        st.session_state.selected_folder_path = ""
+                        st.info("Folder selection cleared")
+            else:
+                # Only show clear button in cloud mode
+                col_clear, col_spacer = st.columns([1, 3])
+                with col_clear:
+                    if st.button("🗑️ Clear", help="Clear folder selection", type="secondary", use_container_width=True):
+                        st.session_state.selected_folder_path = ""
+                        st.info("Folder selection cleared")
+                
+                # Cloud-specific helper section
+                st.markdown("**🌐 Cloud Environment Tips:**")
+                with st.expander("💡 Common folder examples", expanded=False):
+                    st.markdown("""
+                    **Sample folder paths you can try:**
+                    - `data` - if you have a data folder
+                    - `textData` - common data folder name
+                    - `documents` - for document folders
+                    - `files` - generic files folder
+                    - `.` - current directory (scan all files)
+                    
+                    **Note:** Make sure to upload your data files to the app first if testing with real data.
+                    """)
+                    
+                    # Quick select buttons for common paths
+                    st.markdown("**Quick select:**")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        if st.button("📁 textData", help="Select textData folder"):
+                            st.session_state.selected_folder_path = "textData"
+                            try:
+                                st.rerun()
+                            except:
+                                st.experimental_rerun()
+                    with col2:
+                        if st.button("📁 data", help="Select data folder"):
+                            st.session_state.selected_folder_path = "data"
+                            try:
+                                st.rerun()
+                            except:
+                                st.experimental_rerun()
+                    with col3:
+                        if st.button("📁 . (current)", help="Select current directory"):
+                            st.session_state.selected_folder_path = "."
+                            try:
+                                st.rerun()
+                            except:
+                                st.experimental_rerun()
             
-            # Use the path from session state
+            # Final validation and feedback for Browse for folder option
             current_path = st.session_state.selected_folder_path
             if current_path:
                 if os.path.exists(current_path) and os.path.isdir(current_path):
@@ -605,11 +686,70 @@ def main():
                         st.success("✅ Path exists and is accessible")
                 elif os.path.exists(current_path):
                     st.error("❌ Path exists but is not a folder")
+                    selected_folder = None
                 else:
                     st.error("❌ Path does not exist")
+                    selected_folder = None
+        
+        elif scan_option == "Upload sample data" and not TKINTER_AVAILABLE:
+            st.markdown("**📎 Upload Sample Data for Testing:**")
+            st.info("🌐 In cloud mode, you can upload sample files to test the application functionality.")
+            
+            uploaded_files = st.file_uploader(
+                "Choose files to upload for testing",
+                accept_multiple_files=True,
+                type=['md', 'json', 'log', 'txt'],
+                help="Upload some sample files to create a test folder structure"
+            )
+            
+            if uploaded_files:
+                st.success(f"✅ {len(uploaded_files)} files uploaded successfully!")
+                
+                # Create a temporary folder structure
+                import tempfile
+                import shutil
+                
+                if 'temp_upload_dir' not in st.session_state:
+                    st.session_state.temp_upload_dir = tempfile.mkdtemp(prefix="streamlit_upload_")
+                
+                upload_dir = st.session_state.temp_upload_dir
+                
+                # Save uploaded files
+                for uploaded_file in uploaded_files:
+                    file_path = os.path.join(upload_dir, uploaded_file.name)
+                    with open(file_path, 'wb') as f:
+                        f.write(uploaded_file.getbuffer())
+                
+                st.info(f"📁 Files saved to temporary directory: {upload_dir}")
+                st.markdown("**Files uploaded:**")
+                for file in uploaded_files:
+                    st.markdown(f"- {file.name} ({file.size} bytes)")
+                
+                # Set the upload directory as selected folder
+                selected_folder = upload_dir
+                st.success(f"✅ Ready to scan uploaded files in: {os.path.basename(upload_dir)}")
+                
+                if st.button("🗑️ Clear uploaded files"):
+                    try:
+                        shutil.rmtree(upload_dir)
+                        del st.session_state.temp_upload_dir
+                        st.success("Uploaded files cleared")
+                        try:
+                            st.rerun()
+                        except:
+                            # Fallback for older Streamlit versions
+                            st.experimental_rerun()
+                    except:
+                        st.error("Error clearing uploaded files")
         
         # Scan button
         scan_button = st.button("🚀 Start Scan", type="primary", disabled=not selected_folder)
+        
+        # Debug information (can be removed in production)
+        if selected_folder:
+            st.sidebar.success(f"✅ Folder ready: {selected_folder}")
+        else:
+            st.sidebar.info("ℹ️ Select a folder to enable scanning")
         
         # Additional options
         st.markdown("#### 🔧 Options")
@@ -779,6 +919,9 @@ def main():
         2. Click "Start Scan" to begin the analysis
         3. Review the results in the interactive dashboard
         4. Export reports for further analysis
+        
+        **🌐 Cloud Environment:**
+        This app works both locally and in the cloud. In cloud mode, use manual path entry to specify folders.
         
         **Get started by selecting a folder in the sidebar! 👈**
         """)
