@@ -22,6 +22,9 @@ import plotly.graph_objects as go
 from typing import List, Dict, Tuple
 import base64
 import threading
+import zipfile
+import tempfile
+import shutil
 
 # Optional tkinter import for local environments
 try:
@@ -99,6 +102,102 @@ class StreamlitMissingFilesDetector:
         except Exception as e:
             st.error(f"Error reading folders: {e}")
         return sorted(folders)
+    
+    def extract_zip_file(self, uploaded_file, progress_bar=None) -> Tuple[str, Dict]:
+        """Extract ZIP file and return extraction directory and structure info."""
+        try:
+            # Create temporary directory for extraction
+            temp_dir = tempfile.mkdtemp(prefix="zip_scan_")
+            
+            # Save uploaded file to temporary location
+            zip_path = os.path.join(temp_dir, "uploaded.zip")
+            with open(zip_path, "wb") as f:
+                f.write(uploaded_file.getvalue())
+            
+            # Extract ZIP file
+            extract_dir = os.path.join(temp_dir, "extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            structure_info = {
+                "total_files": 0,
+                "total_folders": 0,
+                "file_types": {},
+                "folder_structure": []
+            }
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                # Get file list for progress tracking
+                file_list = zip_ref.namelist()
+                total_files = len(file_list)
+                
+                # Extract files with progress
+                for idx, file_name in enumerate(file_list):
+                    if progress_bar:
+                        progress_bar.progress((idx + 1) / total_files)
+                    
+                    # Extract individual file
+                    zip_ref.extract(file_name, extract_dir)
+                    
+                    # Analyze structure
+                    file_path = Path(file_name)
+                    if file_name.endswith('/'):
+                        structure_info["total_folders"] += 1
+                        structure_info["folder_structure"].append(file_name)
+                    else:
+                        structure_info["total_files"] += 1
+                        # Track file types
+                        suffix = file_path.suffix.lower()
+                        if suffix:
+                            structure_info["file_types"][suffix] = structure_info["file_types"].get(suffix, 0) + 1
+                        else:
+                            structure_info["file_types"]["no_extension"] = structure_info["file_types"].get("no_extension", 0) + 1
+            
+            return extract_dir, structure_info
+            
+        except zipfile.BadZipFile:
+            st.error("❌ Invalid ZIP file. Please upload a valid ZIP archive.")
+            return None, None
+        except Exception as e:
+            st.error(f"❌ Error extracting ZIP file: {e}")
+            return None, None
+    
+    def cleanup_temp_directory(self, temp_dir: str):
+        """Clean up temporary extraction directory."""
+        try:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+        except Exception as e:
+            st.warning(f"Could not clean up temporary directory: {e}")
+    
+    def display_zip_structure(self, structure_info: Dict):
+        """Display ZIP file structure information."""
+        if not structure_info:
+            return
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("📁 Total Folders", structure_info["total_folders"])
+            st.metric("📄 Total Files", structure_info["total_files"])
+        
+        with col2:
+            if structure_info["file_types"]:
+                st.write("**File Types:**")
+                for ext, count in sorted(structure_info["file_types"].items()):
+                    if ext == "no_extension":
+                        st.write(f"• No extension: {count} files")
+                    else:
+                        st.write(f"• {ext}: {count} files")
+        
+        # Show folder structure preview (first 10 folders)
+        if structure_info["folder_structure"]:
+            with st.expander("📂 Folder Structure Preview", expanded=False):
+                preview_folders = structure_info["folder_structure"][:10]
+                for folder in preview_folders:
+                    st.code(folder, language=None)
+                
+                if len(structure_info["folder_structure"]) > 10:
+                    st.info(f"... and {len(structure_info['folder_structure']) - 10} more folders")
     
     def is_leaf_folder(self, folder_path: Path) -> bool:
         """Check if a folder is a leaf folder (contains no subfolders)."""
@@ -537,7 +636,7 @@ def main():
         if TKINTER_AVAILABLE:
             scan_options = ["Use textData folder", "Select custom folder", "Browse for folder"]
         else:
-            scan_options = ["Use textData folder", "Select custom folder", "Browse for folder", "Upload sample data"]
+            scan_options = ["Use textData folder", "Select custom folder", "Browse for folder", "Upload ZIP folder", "Upload individual files"]
         
         scan_option = st.radio(
             "Scanning Options:",
@@ -691,9 +790,182 @@ def main():
                     st.error("❌ Path does not exist")
                     selected_folder = None
         
-        elif scan_option == "Upload sample data" and not TKINTER_AVAILABLE:
-            st.markdown("**📎 Upload Sample Data for Testing:**")
-            st.info("🌐 In cloud mode, you can upload sample files to test the application functionality.")
+        elif scan_option == "Upload ZIP folder" and not TKINTER_AVAILABLE:
+            st.markdown("**📦 Upload ZIP File for Folder Analysis:**")
+            st.info("🎯 Perfect solution! Upload a ZIP file containing your folders and files for complete analysis.")
+            
+            # Enhanced instructions for ZIP upload
+            st.markdown("""
+            **📋 How to prepare and upload your ZIP file:**
+            1. **Create ZIP file:** Select your folder(s) on your PC and compress to ZIP
+            2. **Upload ZIP:** Use the uploader below to upload your ZIP file
+            3. **Auto-extract:** The app will extract and analyze the complete folder structure
+            4. **Full analysis:** All folders, subfolders, and files will be scanned
+            
+            **✅ Advantages of ZIP upload:**
+            - Preserves complete folder hierarchy
+            - Handles any number of files and folders
+            - Maintains original file organization
+            - Works with complex nested structures
+            
+            **📁 Supported file types in ZIP:**
+            All file types are supported - .md, .json, .log, .txt, .pdf, .docx, images, etc.
+            """)
+            
+            uploaded_zip = st.file_uploader(
+                "Choose a ZIP file to upload and extract",
+                type=['zip'],
+                help="Upload a ZIP file containing your folders and files for analysis"
+            )
+            
+            if uploaded_zip is not None:
+                import zipfile
+                import tempfile
+                import shutil
+                
+                try:
+                    st.success(f"✅ ZIP file uploaded: {uploaded_zip.name} ({uploaded_zip.size:,} bytes)")
+                    
+                    # Create temporary directory for extraction
+                    if 'temp_zip_dir' not in st.session_state:
+                        st.session_state.temp_zip_dir = tempfile.mkdtemp(prefix="streamlit_zip_")
+                    
+                    extract_dir = st.session_state.temp_zip_dir
+                    
+                    # Extract ZIP file
+                    with st.spinner("Extracting ZIP file..."):
+                        zip_bytes = uploaded_zip.read()
+                        
+                        # Save ZIP file temporarily
+                        zip_path = os.path.join(extract_dir, uploaded_zip.name)
+                        with open(zip_path, 'wb') as f:
+                            f.write(zip_bytes)
+                        
+                        # Extract ZIP contents
+                        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                            zip_ref.extractall(extract_dir)
+                        
+                        # Remove the ZIP file itself, keep only extracted contents
+                        os.remove(zip_path)
+                    
+                    st.success("🎉 ZIP file extracted successfully!")
+                    
+                    # Analyze extracted structure
+                    total_folders = 0
+                    total_files = 0
+                    file_types = {'md': 0, 'json': 0, 'log': 0, 'other': 0}
+                    
+                    for root, dirs, files in os.walk(extract_dir):
+                        total_folders += len(dirs)
+                        total_files += len(files)
+                        
+                        for file in files:
+                            ext = file.split('.')[-1].lower() if '.' in file else 'other'
+                            if ext in ['md', 'markdown']:
+                                file_types['md'] += 1
+                            elif ext == 'json':
+                                file_types['json'] += 1
+                            elif ext == 'log':
+                                file_types['log'] += 1
+                            else:
+                                file_types['other'] += 1
+                    
+                    # Display extraction summary
+                    st.markdown("**📊 Extracted Structure Analysis:**")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Folders", total_folders)
+                    with col2:
+                        st.metric("Total Files", total_files)
+                    with col3:
+                        st.metric("MD Documents", file_types['md'])
+                    with col4:
+                        st.metric("JSON Files", file_types['json'])
+                    
+                    # Show detailed file type breakdown
+                    with st.expander("📁 Detailed File Breakdown", expanded=False):
+                        col_md, col_json, col_log, col_other = st.columns(4)
+                        
+                        with col_md:
+                            st.write(f"**MD Files:** {file_types['md']}")
+                        with col_json:
+                            st.write(f"**JSON Files:** {file_types['json']}")
+                        with col_log:
+                            st.write(f"**Log Files:** {file_types['log']}")
+                        with col_other:
+                            st.write(f"**Other Files:** {file_types['other']}")
+                    
+                    # Show folder structure preview
+                    with st.expander("🌳 Folder Structure Preview", expanded=False):
+                        st.markdown("**Top-level folders and files:**")
+                        try:
+                            items = os.listdir(extract_dir)
+                            folders = [item for item in items if os.path.isdir(os.path.join(extract_dir, item))]
+                            files = [item for item in items if os.path.isfile(os.path.join(extract_dir, item))]
+                            
+                            if folders:
+                                st.write("📁 **Folders:**")
+                                for folder in sorted(folders)[:10]:  # Show first 10
+                                    st.write(f"  • {folder}")
+                                if len(folders) > 10:
+                                    st.write(f"  ... and {len(folders) - 10} more folders")
+                            
+                            if files:
+                                st.write("📄 **Files:**")
+                                for file in sorted(files)[:10]:  # Show first 10
+                                    st.write(f"  • {file}")
+                                if len(files) > 10:
+                                    st.write(f"  ... and {len(files) - 10} more files")
+                        except Exception as e:
+                            st.write(f"Error reading structure: {e}")
+                    
+                    # Set extracted directory as selected folder
+                    selected_folder = extract_dir
+                    st.success("🚀 Ready to scan extracted ZIP contents! Click 'Start Scan' to analyze.")
+                    st.info(f"📂 Scanning path: {os.path.basename(extract_dir)} (extracted from {uploaded_zip.name})")
+                    
+                    # Clear ZIP contents option
+                    col_clear, col_info = st.columns([1, 2])
+                    with col_clear:
+                        if st.button("🗑️ Clear ZIP contents", type="secondary"):
+                            try:
+                                shutil.rmtree(extract_dir)
+                                del st.session_state.temp_zip_dir
+                                st.success("ZIP contents cleared")
+                                try:
+                                    st.rerun()
+                                except:
+                                    st.experimental_rerun()
+                            except Exception as e:
+                                st.error(f"Error clearing ZIP contents: {e}")
+                    
+                    with col_info:
+                        st.caption("💡 Upload a new ZIP file or clear to start over")
+                
+                except zipfile.BadZipFile:
+                    st.error("❌ Invalid ZIP file. Please upload a valid ZIP archive.")
+                except Exception as e:
+                    st.error(f"❌ Error processing ZIP file: {e}")
+            
+            else:
+                st.markdown("""
+                **💡 How to create a ZIP file:**
+                
+                **Windows:**
+                1. Right-click your folder
+                2. Select "Send to" → "Compressed (zipped) folder"
+                
+                **Mac:**
+                1. Right-click your folder
+                2. Select "Compress [folder name]"
+                
+                **The ZIP file will contain your complete folder structure for analysis!**
+                """)
+        
+        elif scan_option == "Upload individual files" and not TKINTER_AVAILABLE:
+            st.markdown("**📎 Upload Individual Files (Alternative Method):**")
+            st.info("💡 If you can't create a ZIP file, upload individual files. Less organized but still functional for testing.")
             
             uploaded_files = st.file_uploader(
                 "Choose files to upload for testing",
