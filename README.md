@@ -6,12 +6,9 @@ This is a comprehensive web-based application built with Streamlit to detect mis
 
 ## 🚀 Quick Start
 
-### Method 1: Easy Startup (Recommended)
-```bash
-python run_streamlit_app.py
-```
 
-### Method 2: Manual Setup
+
+###  Manual Setup
 ```bash
 # Install requirements
 pip install -r requirements.txt
@@ -287,3 +284,4 @@ For processing multiple folders:
 The Streamlit application provides a powerful, user-friendly interface for comprehensive folder analysis. Use the interactive features to gain insights into your file organization and systematically address any missing files.
 
 For technical support or feature requests, please refer to the documentation or contact support.
+
